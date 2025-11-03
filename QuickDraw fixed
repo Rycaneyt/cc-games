@@ -1,0 +1,117 @@
+-- QuickDraw.lua — Pocket Client (robuste Version)
+-- Matches den simplen "Quick Draw" Flow: Join -> Warten -> GO -> Drücken
+-- Änderungen sind minimal und mit "-- FIX"/"-- SAFE" markiert.
+
+---------------------- Konfiguration ----------------------
+local MATCH_CODE = "QD123"   -- muss zum Server passen
+-----------------------------------------------------------
+
+-- Modem öffnen
+local modem = peripheral.find("modem")
+assert(modem, "Kein Modem gefunden!")
+rednet.open(peripheral.getName(modem))
+
+-- Farben/Schreiben
+local function clr(fg,bg)
+  term.setTextColor(fg or colors.white)
+  term.setBackgroundColor(bg or colors.black)
+end
+
+-- Mittig schreiben (eine Zeile)
+local function center(y, txt, fg, bg)
+  txt = tostring(txt or "")                  -- FIX: immer String
+  local w,h = term.getSize()
+  clr(fg,bg)
+  term.setCursorPos(math.floor((w - #txt)/2) + 1, y)
+  term.write(txt)
+  clr()
+end
+
+-- Einfacher 2-Zeilen-Screen
+local function screen(title, subtitle, colorTitle, colorSub)
+  term.clear()
+  center(2, title or "",  colorTitle or colors.yellow)
+  if subtitle then center(4, subtitle, colorSub or colors.lightGray) end
+end
+
+-- Name holen/speichern
+local defaultName = os.getComputerLabel() or ("Pocket"..os.getComputerID())
+term.clear()
+print("Dein Name (Enter = '"..defaultName.."'):")
+local inName = read()
+local NAME = (inName and inName ~= "") and inName or defaultName
+pcall(os.setComputerLabel, NAME)
+
+-- Verbindung herstellen
+local function connect()
+  screen("QuickDraw", "Verbinde...")
+  rednet.broadcast({code=MATCH_CODE, name=NAME}, "qd_join")
+  local id, ack = rednet.receive("qd_ack", 8)
+  assert(id and type(ack)=="table" and ack.ok, "Kein Server / falscher Code.")
+  if ack.name and ack.name ~= NAME then NAME = ack.name; pcall(os.setComputerLabel, NAME) end
+  screen("QuickDraw", "Verbunden als: "..NAME, colors.yellow, colors.cyan)
+  sleep(1)
+end
+
+connect()
+
+-- Hauptschleife: Runden spielen
+while true do
+  -- Wartephase (vor GO): NICHT drücken!
+  screen("Bereit machen...", "Nicht drücken!", colors.orange, colors.red)
+  local goTime = nil
+  local early = false
+
+  while true do
+    local e,a,b,c = os.pullEvent()
+    if e == "rednet_message" and c == "qd_evt" and type(b) == "table" then  -- SAFE
+      if b.type == "ready" then
+        -- ignorieren; Anzeige bleibt
+      elseif b.type == "go" then
+        goTime = b.t0 or true
+        screen("JETZT!!!", "DRÜCK JETZT!", colors.lime, colors.white)
+        break
+      elseif b.type == "end" then
+        screen("Match Ende", "Sieger: "..tostring(b.winner or "?"), colors.lime, colors.white)
+        sleep(2.5)
+        connect()
+        screen("Bereit machen...", "Nicht drücken!", colors.orange, colors.red)
+      end
+    elseif e == "mouse_click" or e == "key" then
+      -- Zu früh gedrückt
+      rednet.broadcast({code=MATCH_CODE, action="early"}, "qd_click")
+      screen("Zu früh!", "Warte auf nächste Runde...", colors.red, colors.lightGray)
+      early = true
+      sleep(2)
+      break
+    end
+  end
+
+  -- Wenn zu früh: nächste Runde abwarten
+  if early then
+    goto continue_round
+  end
+
+  -- Reaktionsphase (nach GO): erster Klick/Tastendruck sendet "press"
+  local pressed = false
+  while not pressed do
+    local e = { os.pullEvent() }
+    if e[1] == "mouse_click" or e[1] == "key" then
+      rednet.broadcast({code=MATCH_CODE, action="press"}, "qd_click")
+      screen("GESCHAFFT!", "Warte auf Auswertung...", colors.lime, colors.white)
+      pressed = true
+      sleep(1.2)
+    elseif e[1] == "rednet_message" and e[3] == "qd_evt" then  -- SAFE
+      local msg = e[2]
+      if type(msg) == "table" and msg.type == "end" then
+        screen("Match Ende", "Sieger: "..tostring(msg.winner or "?"), colors.lime, colors.white)
+        sleep(2.5)
+        connect()
+        break
+      end
+    end
+  end
+
+  ::continue_round::
+  -- zurück an den Schleifenanfang (nächste Runde)
+end
